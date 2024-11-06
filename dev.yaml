@@ -1,26 +1,198 @@
-name: Android CI 
+name: iOS CI/CD with Flutter Version Update, Fastlane Deployment, and Health Checks
 
-on: 
-  push: 
-    branches: 
-      - main 
-  pull_request: 
-jobs: 
-  build: 
-    runs-on: ubuntu-latest 
-    steps: 
-      - name: Checkout code 
-        uses: actions/checkout@v2 
-      - name: Set up JDK 11 
-        uses: actions/setup-java@v2 
-        with: 
-          java-version: '11' 
-          distribution: 'adopt' 
-      - name: Grant execute permission for gradlew 
-        run: chmod +x ./gradlew 
-      - name: Build debug apk 
-        run: ./gradlew assembleDebug 
-      - name: Run unit tests 
-        run: ./gradlew testDebug 
-      - name: Lint code 
-        run: ./gradlew lintDebug 
+on:
+  push:
+    branches:
+      - 'main' 
+permissions:
+  contents: write
+
+jobs:
+  update-versions:
+    name: Check and Update Flutter/Dart Versions
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 'latest'
+      
+      - name: Health Check - Flutter Installed
+        run: |
+          if ! flutter --version; then
+            echo "Error: Flutter installation failed. Flutter is not accessible."
+            exit 1
+          else
+            echo "Success: Flutter is installed."
+          fi
+        shell: bash
+
+      - name: Get Flutter Version
+        id: flutter_version
+        run: echo "FLUTTER_VERSION=$(flutter --version | grep 'Flutter' | awk '{print $2}')" >> $GITHUB_ENV
+
+      - name: Get Dart Version
+        id: dart_version
+        run: echo "DART_VERSION=$(dart --version 2>&1 | awk '{print $4}')" >> $GITHUB_ENV
+
+      - name: Health Check - Flutter/Dart Versions
+        run: |
+          if [ -z "$FLUTTER_VERSION" ] || [ -z "$DART_VERSION" ]; then
+            echo "Error: Could not retrieve Flutter or Dart version. Ensure Flutter and Dart are properly installed."
+            exit 1
+          else
+            echo "Success: Retrieved Flutter and Dart versions."
+          fi
+        shell: bash
+
+      - name: Update pubspec.yaml with Flutter and Dart Versions
+        run: |
+          FLUTTER_VERSION=$(echo $FLUTTER_VERSION)
+          DART_VERSION=$(echo $DART_VERSION)
+          sed -i '' "s/^  sdk: \">=[0-9\.]* <[0-9\.]*\"/  sdk: \">=${DART_VERSION} <3.0.0\"/" pubspec.yaml
+          sed -i '' "s/flutter: ^[0-9\.]*/flutter: ^${FLUTTER_VERSION}/" pubspec.yaml
+
+      - name: Commit Changes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --local user.name "GitHub Actions"
+          git config --local user.email "actions@github.com"
+          git add pubspec.yaml
+          git commit -m "Updated Flutter and Dart versions to match installed versions"
+          git push origin main
+        continue-on-error: true
+
+  build:
+    name: Build, Test, and Deploy iOS App
+    runs-on: macos-latest
+    needs: update-versions
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 'latest'
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.0'
+
+      - name: Health Check - Xcode Setup
+        run: |
+          if ! xcodebuild -version; then
+            echo "Error: Xcode setup failed. Xcode is not accessible."
+            exit 1
+          else
+            echo "Success: Xcode is set up."
+          fi
+        shell: bash
+
+      - name: Clean Flutter Project
+        run: flutter clean
+
+      - name: Health Check - Flutter Clean
+        run: |
+          if [ $? -ne 0 ]; then
+            echo "Error: flutter clean failed. Check for issues in the project setup."
+            exit 1
+          else
+            echo "Success: Flutter project cleaned."
+          fi
+        shell: bash
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Health Check - Dependencies
+        run: |
+          if [ $? -ne 0 ]; then
+            echo "Error: flutter pub get failed. Dependency installation was unsuccessful."
+            exit 1
+          else
+            echo "Success: Dependencies installed."
+          fi
+        shell: bash
+
+      - name: Build iOS App
+        run: flutter build ios --release
+
+      - name: Health Check - Build iOS App
+        run: |
+          if [ $? -ne 0 ]; then
+            echo "Error: iOS build failed. Check the build logs for more details."
+            exit 1
+          else
+            echo "Success: iOS app built successfully."
+          fi
+        shell: bash
+
+      - name: Upload IPA as Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: iOS-IPA
+          path: build/ios/ipa/*.ipa
+
+      - name: Health Check - Upload IPA
+        run: |
+          if [ $? -ne 0 ]; then
+            echo "Error: Upload IPA failed. The .ipa file could not be uploaded."
+            exit 1
+          else
+            echo "Success: IPA uploaded as artifact."
+          fi
+        shell: bash
+
+      - name: Install Fastlane
+        run: sudo gem install fastlane
+
+      - name: Health Check - Fastlane Installation
+        run: |
+          if ! fastlane -v; then
+            echo "Error: Fastlane installation failed."
+            exit 1
+          else
+            echo "Success: Fastlane installed."
+          fi
+        shell: bash
+
+      - name: Setup App Store Connect API Key
+        env:
+          APP_STORE_KEY_ID: ${{ secrets.APP_STORE_KEY_ID }}
+          APP_STORE_ISSUER_ID: ${{ secrets.APP_STORE_ISSUER_ID }}
+          APP_STORE_KEY_CONTENT: ${{ secrets.APP_STORE_KEY_CONTENT }}
+        run: |
+          echo -n "$APP_STORE_KEY_CONTENT" > AuthKey.p8
+          if [ ! -f "AuthKey.p8" ]; then
+            echo "Error: App Store Connect API Key setup failed. AuthKey.p8 not created."
+            exit 1
+          else
+            echo "Success: App Store Connect API Key setup completed."
+          fi
+
+      - name: Deploy to App Store using Fastlane
+        env:
+          APP_STORE_KEY_ID: ${{ secrets.APP_STORE_KEY_ID }}
+          APP_STORE_ISSUER_ID: ${{ secrets.APP_STORE_ISSUER_ID }}
+          APP_STORE_KEY_CONTENT: ${{ secrets.APP_STORE_KEY_CONTENT }}
+        run: |
+          fastlane deliver --api_key_path AuthKey.p8 --username "your_apple_id@example.com" --ipa "./build/ios/ipa/*.ipa" --skip_screenshots --skip_metadata --force
+        shell: bash
+
+      - name: Health Check - App Store Deployment
+        run: |
+          if [ $? -ne 0 ]; then
+            echo "Error: Deployment to App Store failed. Check Fastlane logs for details."
+            exit 1
+          else
+            echo "Success: App deployed to App Store successfully."
+          fi
+        shell: bash
